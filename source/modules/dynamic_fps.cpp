@@ -19,6 +19,7 @@
 #include "utils/fmt_exception.h"
 #include "utils/misc.h"
 #include "utils/misc_android.h"
+#include "utils/switch_verify.h"
 #include <cerrno>
 #include <climits>
 #include <cstdlib>
@@ -344,13 +345,45 @@ void DynamicFps::SwitchRefreshRate(int hz) {
         return;
     }
 
-    std::string hzStr = std::to_string(hz);
+    // attempt -> verify -> degrade to the other backend -> rollback
+    auto applyBackend = [force](int v, bool useSfBackdoor) {
+        auto vStr = std::to_string(v);
+        return useSfBackdoor ? SysSurfaceflingerBackdoor(vStr, force) : SysPeakRefreshRate(vStr, force);
+    };
+
+    auto result = TrySwitchWithFallback(hz, useSfBackdoor_, applyBackend);
+    switch (result) {
+        case SwitchBackendResult::kPrimary:
+            break;
+        case SwitchBackendResult::kFallback:
+            useSfBackdoor_ = !useSfBackdoor_;
+            SPDLOG_WARN("Primary refresh-rate backend failed, degraded to {}",
+                        useSfBackdoor_ ? "surfaceflinger backdoor" : "PEAK_REFRESH_RATE");
+            break;
+        case SwitchBackendResult::kFailed:
+            SPDLOG_ERROR("Cannot switch refresh rate to {}, rolling back", hz);
+            RollbackRefreshRate();
+            return;
+    }
+
+    // only publish the new rate after it was verified on-device
     curHz_ = hz;
-    NotifyRefreshRate(hzStr);
-    if (useSfBackdoor_) {
-        SysSurfaceflingerBackdoor(hzStr, force);
+    NotifyRefreshRate(std::to_string(hz));
+}
+
+void DynamicFps::RollbackRefreshRate(void) {
+    if (curHz_ == INT32_MAX) {
+        return; // no known-good rate to roll back to
+    }
+
+    auto hzStr = std::to_string(curHz_);
+    bool ok = useSfBackdoor_ ? SysSurfaceflingerBackdoor(hzStr, true) : SysPeakRefreshRate(hzStr, true);
+    if (ok) {
+        SPDLOG_INFO("Rolled back to previous refresh rate {}", curHz_);
     } else {
-        SysPeakRefreshRate(hzStr, force);
+        // actual rate is unknown now; force re-apply on the next switch
+        SPDLOG_ERROR("Rollback to {} failed, refresh rate state unknown", curHz_);
+        curHz_ = INT32_MAX;
     }
 }
 

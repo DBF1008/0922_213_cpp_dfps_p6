@@ -16,6 +16,7 @@
 
 #include "misc_android.h"
 #include "utils/misc.h"
+#include "utils/switch_verify.h"
 #include <cstring>
 #include <dirent.h>
 #include <stdlib.h>
@@ -227,25 +228,42 @@ int GetScreenBrightness(void) {
     return -1;
 }
 
-void CallSettingsPut(const char *ns, const char *key, const char *val) {
-    ExecCmd(nullptr, "/system/bin/cmd", "settings", "put", ns, key, val);
+static bool GetSettingsValue(const char *ns, const char *key, std::string *val) {
+    return ExecCmdSync(val, "/system/bin/cmd", "settings", "get", ns, key) == 0 && val->empty() == false;
 }
 
-void SyncCallSurfaceflingerBackdoor(const char *code, const char *hz) {
-    ExecCmdSync(nullptr, "/system/bin/service", "call", "SurfaceFlinger", code, "i32", hz);
+// Writes a settings key and verifies it by reading the value back.
+static bool CallSettingsPutVerified(const char *ns, const char *key, const char *val) {
+    // synchronous put so the readback below cannot race the write
+    ExecCmdSync(nullptr, "/system/bin/cmd", "settings", "put", ns, key, val);
+    std::string got;
+    if (GetSettingsValue(ns, key, &got) == false) {
+        return false;
+    }
+    return VerifySettingsReadback(val, got);
 }
 
-void SysPeakRefreshRate(const std::string &hz, bool force) {
-    CallSettingsPut("system", "peak_refresh_rate", hz.c_str());
-    CallSettingsPut("system", "min_refresh_rate", hz.c_str());
-    CallSettingsPut("system", "miui_refresh_rate", hz.c_str());
-    CallSettingsPut("secure", "miui_refresh_rate", hz.c_str());
+// Returns true only when the service call exited cleanly and replied a parcel.
+static bool SyncCallSurfaceflingerBackdoor(const char *code, const char *hz) {
+    std::string out;
+    int status = ExecCmdSync(&out, "/system/bin/service", "call", "SurfaceFlinger", code, "i32", hz);
+    return IsServiceCallResultOk(status, out);
 }
 
-void SysSurfaceflingerBackdoor(const std::string &idx, bool force) {
+bool SysPeakRefreshRate(const std::string &hz, bool force) {
+    // AOSP-standard keys are required to verify
+    bool ok = CallSettingsPutVerified("system", "peak_refresh_rate", hz.c_str());
+    ok = CallSettingsPutVerified("system", "min_refresh_rate", hz.c_str()) && ok;
+    // ROM-private keys are best-effort: not all devices implement them
+    CallSettingsPutVerified("system", "miui_refresh_rate", hz.c_str());
+    CallSettingsPutVerified("secure", "miui_refresh_rate", hz.c_str());
+    return ok;
+}
+
+bool SysSurfaceflingerBackdoor(const std::string &idx, bool force) {
     // >= Android 10
     // 1035 -1/0/1/2: setActiveConfig
-    SyncCallSurfaceflingerBackdoor("1035", idx.c_str());
+    bool ok = SyncCallSurfaceflingerBackdoor("1035", idx.c_str());
 
     if (force) {
         // >= Android 11
@@ -254,9 +272,12 @@ void SysSurfaceflingerBackdoor(const std::string &idx, bool force) {
         // service call SurfaceFlinger 1035 i32 -1 -- okay
         // service call SurfaceFlinger 1036 i32 1
         // service call SurfaceFlinger 1035 i32 2 -- not working
+        // the token dance is best-effort (1036 requires Android 11+),
+        // only the final setActiveConfig is required to verify
         SyncCallSurfaceflingerBackdoor("1036", "1");
         SyncCallSurfaceflingerBackdoor("1035", "-1");
         SyncCallSurfaceflingerBackdoor("1036", "0");
-        SyncCallSurfaceflingerBackdoor("1035", idx.c_str());
+        ok = SyncCallSurfaceflingerBackdoor("1035", idx.c_str()) && ok;
     }
+    return ok;
 }
