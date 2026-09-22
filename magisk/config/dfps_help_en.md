@@ -32,6 +32,11 @@ dfps supports 2 refresh rate switching methods to adapt to more devices.
 Use `PEAK_REFRESH_RATE` method if `useSfBackdoor` = 0. Use `Surfaceflinger backdoor` method if `useSfBackdoor` = 1.  
 Default value `0`, optional `0` and `1`.  
 
+Every switch is verified after applying: the `PEAK_REFRESH_RATE` method reads the system settings back,
+and the `Surfaceflinger backdoor` method checks the transaction result.
+If the verification fails, dfps tries the other backend as a fallback when the value is valid for it,
+or rolls back to the previous refresh rate. The notify file is only updated after a verified switch.
+
 #### PEAK_REFRESH_RATE
 
 Call Android's native dynamic refresh rate interface, the setting value is intuitive, but it is not suitable for all devices.

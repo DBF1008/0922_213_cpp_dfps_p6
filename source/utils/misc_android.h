@@ -24,5 +24,14 @@ std::string GetHomePackageName(void);
 std::string GetTombstone(int pid);
 int GetScreenBrightness(void);
 
-void SysPeakRefreshRate(const std::string &hz, bool force);
-void SysSurfaceflingerBackdoor(const std::string &idx, bool force);
+// Value validators shared by the switch backends and the fallback logic.
+// PeakRefreshRate accepts Hz values: -1 (system default) or >= 20.
+// SurfaceflingerBackdoor accepts display config indices: -1 (reset) or [0, 16].
+bool IsValidPeakRefreshRateValue(const std::string &hz);
+bool IsValidSfBackdoorIdxValue(const std::string &idx);
+
+// Try to switch the refresh rate and verify the result.
+// Returns true only when the value was accepted AND verified, so the caller
+// can fall back to the other backend or roll back instead of faking success.
+bool SysPeakRefreshRate(const std::string &hz, bool force);
+bool SysSurfaceflingerBackdoor(const std::string &idx, bool force);

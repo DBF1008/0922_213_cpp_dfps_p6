@@ -50,6 +50,7 @@ private:
 
     void SwitchRefreshRate(bool force = false);
     void SwitchRefreshRate(int hz);
+    bool ApplyRefreshRate(const std::string &hzStr, bool force);
     void NotifyRefreshRate(const std::string_view &hz);
 
     bool useSfBackdoor_;

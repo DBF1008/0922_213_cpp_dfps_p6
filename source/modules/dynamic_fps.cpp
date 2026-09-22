@@ -345,13 +345,51 @@ void DynamicFps::SwitchRefreshRate(int hz) {
     }
 
     std::string hzStr = std::to_string(hz);
+    if (ApplyRefreshRate(hzStr, force) == false) {
+        // keep curHz_ unchanged so the next event retries the switch,
+        // and do not touch the notify file to fake a successful switch
+        SPDLOG_ERROR("Failed to switch refresh rate to {}", hz);
+        return;
+    }
     curHz_ = hz;
     NotifyRefreshRate(hzStr);
-    if (useSfBackdoor_) {
-        SysSurfaceflingerBackdoor(hzStr, force);
-    } else {
-        SysPeakRefreshRate(hzStr, force);
+}
+
+// Try to apply the refresh rate with the configured backend, verify the
+// result, then degrade to the other backend or roll back on failure.
+// Returns true only when a backend verifiably accepted the target value.
+bool DynamicFps::ApplyRefreshRate(const std::string &hzStr, bool force) {
+    bool ok = useSfBackdoor_ ? SysSurfaceflingerBackdoor(hzStr, force) : SysPeakRefreshRate(hzStr, force);
+    if (ok) {
+        return true;
     }
+
+    // degrade: fall back to the other backend when the value is valid for it
+    bool altValid =
+        useSfBackdoor_ ? IsValidPeakRefreshRateValue(hzStr) : IsValidSfBackdoorIdxValue(hzStr);
+    if (altValid) {
+        SPDLOG_WARN("Refresh rate backend failed, try the fallback backend");
+        ok = useSfBackdoor_ ? SysPeakRefreshRate(hzStr, force) : SysSurfaceflingerBackdoor(hzStr, force);
+        if (ok) {
+            useSfBackdoor_ = !useSfBackdoor_;
+            SPDLOG_WARN("Fallback backend works, stick to {} from now on",
+                        useSfBackdoor_ ? "surfaceflinger backdoor" : "peak_refresh_rate");
+            return true;
+        }
+    }
+
+    // rollback: re-apply the last known-good value, so the device is not
+    // left in a half-applied state after a failed switch
+    if (curHz_ != INT32_MAX) {
+        auto prev = std::to_string(curHz_);
+        SPDLOG_WARN("Roll back to the previous refresh rate {}", prev);
+        if (useSfBackdoor_) {
+            SysSurfaceflingerBackdoor(prev, true);
+        } else {
+            SysPeakRefreshRate(prev, true);
+        }
+    }
+    return false;
 }
 
 void DynamicFps::NotifyRefreshRate(const std::string_view &hz) {

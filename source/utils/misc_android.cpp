@@ -16,8 +16,11 @@
 
 #include "misc_android.h"
 #include "utils/misc.h"
+#include <cerrno>
+#include <climits>
 #include <cstring>
 #include <dirent.h>
+#include <spdlog/spdlog.h>
 #include <stdlib.h>
 #include <sys/stat.h>
 #include <sys/system_properties.h>
@@ -227,25 +230,102 @@ int GetScreenBrightness(void) {
     return -1;
 }
 
-void CallSettingsPut(const char *ns, const char *key, const char *val) {
-    ExecCmd(nullptr, "/system/bin/cmd", "settings", "put", ns, key, val);
+static bool ParseIntStrict(const std::string &s, int *out) {
+    if (s.empty()) {
+        return false;
+    }
+    char *end = nullptr;
+    errno = 0;
+    long val = strtol(s.c_str(), &end, 10);
+    if (end == s.c_str() || *end != '\0' || errno == ERANGE || val < INT_MIN || val > INT_MAX) {
+        return false;
+    }
+    *out = static_cast<int>(val);
+    return true;
 }
 
-void SyncCallSurfaceflingerBackdoor(const char *code, const char *hz) {
-    ExecCmdSync(nullptr, "/system/bin/service", "call", "SurfaceFlinger", code, "i32", hz);
+bool IsValidPeakRefreshRateValue(const std::string &hz) {
+    int val = 0;
+    return ParseIntStrict(hz, &val) && (val == -1 || val >= 20);
 }
 
-void SysPeakRefreshRate(const std::string &hz, bool force) {
-    CallSettingsPut("system", "peak_refresh_rate", hz.c_str());
-    CallSettingsPut("system", "min_refresh_rate", hz.c_str());
+bool IsValidSfBackdoorIdxValue(const std::string &idx) {
+    int val = 0;
+    return ParseIntStrict(idx, &val) && val >= -1 && val <= 16;
+}
+
+static std::string GetSettingsValue(const char *ns, const char *key) {
+    std::string buf;
+    ExecCmdSync(&buf, "/system/bin/cmd", "settings", "get", ns, key);
+    while (buf.empty() == false && IsSpace(buf.back())) {
+        buf.pop_back();
+    }
+    return buf;
+}
+
+// Synchronous settings put, returns the exit status of the settings command
+static bool CallSettingsPut(const char *ns, const char *key, const char *val) {
+    return ExecCmdSync(nullptr, "/system/bin/cmd", "settings", "put", ns, key, val) == 0;
+}
+
+// Put then read back, so ROMs that silently reject the write are detected
+static bool CallSettingsPutVerified(const char *ns, const char *key, const std::string &val) {
+    if (CallSettingsPut(ns, key, val.c_str()) == false) {
+        SPDLOG_WARN("settings put {} {} {} failed", ns, key, val);
+        return false;
+    }
+    auto readback = GetSettingsValue(ns, key);
+    if (readback != val) {
+        SPDLOG_WARN("settings {}.{} verify failed, expect '{}' but got '{}'", ns, key, val, readback);
+        return false;
+    }
+    return true;
+}
+
+// service call prints "Result: Parcel(...)" on success, and an error text
+// (or a Parcel wrapping an exception) when the transaction failed
+static bool CallSurfaceflingerBackdoorChecked(const char *code, const char *arg) {
+    std::string out;
+    int status = ExecCmdSync(&out, "/system/bin/service", "call", "SurfaceFlinger", code, "i32", arg);
+    if (status != 0) {
+        SPDLOG_WARN("service call SurfaceFlinger {} {} exit {}", code, arg, status);
+        return false;
+    }
+    if (out.find("Result: Parcel(") == std::string::npos || out.find("Error") != std::string::npos ||
+        out.find("Exception") != std::string::npos) {
+        SPDLOG_WARN("service call SurfaceFlinger {} {} rejected: {}", code, arg, out);
+        return false;
+    }
+    return true;
+}
+
+bool SysPeakRefreshRate(const std::string &hz, bool force) {
+    if (IsValidPeakRefreshRateValue(hz) == false) {
+        SPDLOG_ERROR("Invalid peak refresh rate '{}'", hz);
+        return false;
+    }
+
+    // standard keys must be verified, they are the actual switch interface
+    bool ok = CallSettingsPutVerified("system", "peak_refresh_rate", hz);
+    ok = CallSettingsPutVerified("system", "min_refresh_rate", hz) && ok;
+
+    // ROM private keys are best-effort: write them but never fail on them,
+    // because they simply do not exist on non-MIUI devices
     CallSettingsPut("system", "miui_refresh_rate", hz.c_str());
     CallSettingsPut("secure", "miui_refresh_rate", hz.c_str());
+
+    return ok;
 }
 
-void SysSurfaceflingerBackdoor(const std::string &idx, bool force) {
+bool SysSurfaceflingerBackdoor(const std::string &idx, bool force) {
+    if (IsValidSfBackdoorIdxValue(idx) == false) {
+        SPDLOG_ERROR("Invalid surfaceflinger backdoor index '{}'", idx);
+        return false;
+    }
+
     // >= Android 10
     // 1035 -1/0/1/2: setActiveConfig
-    SyncCallSurfaceflingerBackdoor("1035", idx.c_str());
+    bool ok = CallSurfaceflingerBackdoorChecked("1035", idx.c_str());
 
     if (force) {
         // >= Android 11
@@ -254,9 +334,10 @@ void SysSurfaceflingerBackdoor(const std::string &idx, bool force) {
         // service call SurfaceFlinger 1035 i32 -1 -- okay
         // service call SurfaceFlinger 1036 i32 1
         // service call SurfaceFlinger 1035 i32 2 -- not working
-        SyncCallSurfaceflingerBackdoor("1036", "1");
-        SyncCallSurfaceflingerBackdoor("1035", "-1");
-        SyncCallSurfaceflingerBackdoor("1036", "0");
-        SyncCallSurfaceflingerBackdoor("1035", idx.c_str());
+        ok = CallSurfaceflingerBackdoorChecked("1036", "1") && ok;
+        ok = CallSurfaceflingerBackdoorChecked("1035", "-1") && ok;
+        ok = CallSurfaceflingerBackdoorChecked("1036", "0") && ok;
+        ok = CallSurfaceflingerBackdoorChecked("1035", idx.c_str()) && ok;
     }
+    return ok;
 }

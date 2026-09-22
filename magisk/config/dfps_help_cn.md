@@ -33,6 +33,10 @@ dfps支持2种刷新率切换方法，以适配更多设备。
 `useSfBackdoor`为0使用`PEAK_REFRESH_RATE`法，`useSfBackdoor`为1使用`Surfaceflinger backdoor`法。
 默认值`0`，可选`0`和`1`。
 
+每次切换后dfps都会校验结果：`PEAK_REFRESH_RATE`法回读系统设置比对，`Surfaceflinger backdoor`法检查调用返回。
+校验失败时，若目标值对另一种后端合法则自动降级尝试另一种后端，否则回退到上一次成功的刷新率。
+只有校验成功的切换才会更新通知文件，失败时会在日志中记录`Failed to switch refresh rate`。
+
 #### PEAK_REFRESH_RATE
 
 调用安卓原生的动态刷新率接口，设定值直观，但不适合所有设备。
